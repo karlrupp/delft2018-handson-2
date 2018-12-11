@@ -15,13 +15,15 @@
 -p       2.1
 -lambda  3.0
 -epsilon 1e-5
+-myJ
 
-## Parameters for Jacobian
-#-jtype   1  # Only u'' + e^u
-#-jtype   2  # \nabla( \eta \nabla u ) + e^u
-#-myJ        # Enable this to use 'our' Jacobian
 
-## Parameters for 'automatic' Jacobian (-myJ must NOT be defined)
-#-snes_mf     # Matrix-Free Scheme
-#-snes_fd     # 
 
+#
+## Play with the following parameters (run with -help to get an idea)
+#
+
+
+# -jtype   4     # 1: only Laplace operator, 2: with \eta, 3: Jacobi matrix with star stencil, 4: Full Jacobi matrix
+# -ksp_type     # Linear solver. Experiment :-)
+# -pc_type      # Preconditioner. Experiment :-)

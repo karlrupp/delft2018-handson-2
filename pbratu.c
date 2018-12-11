@@ -74,11 +74,11 @@ int main(int argc,char **argv)
   SNES                   snes;                 /* nonlinear solver */
   Vec                    x,r;                  /* solution, residual vectors */
   AppCtx                 user;                 /* user-defined work context */
-  DM                     dm;
+  DM                     dm,dmstar;
   PetscInt               its;                  /* iterations for convergence */
   SNESConvergedReason    reason;               /* Check convergence */
   PetscReal              bratu_lambda_max = 6.81,bratu_lambda_min = 0.;
-  PetscBool              myJ;
+  PetscBool              myJ,alloc_star;
   PetscErrorCode         ierr;
 
   /* - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
@@ -90,14 +90,15 @@ int main(int argc,char **argv)
   /* - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
      Initialize problem parameters
   - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - */
-  user.lambda = 6.0; user.p = 2.0; user.epsilon = 1e-5; user.jtype = 2; myJ = PETSC_FALSE;
+  user.lambda = 6.0; user.p = 2.0; user.epsilon = 1e-5; user.jtype = 4; myJ = PETSC_TRUE; alloc_star = PETSC_FALSE;
   ierr = PetscOptionsBegin(PETSC_COMM_WORLD,NULL,"p-Bratu options",__FILE__);CHKERRQ(ierr);
   {
     ierr = PetscOptionsReal("-lambda","Bratu parameter","",user.lambda,&user.lambda,NULL);CHKERRQ(ierr);
     ierr = PetscOptionsReal("-p","Exponent `p' in p-Laplacian","",user.p,&user.p,NULL);CHKERRQ(ierr);
     ierr = PetscOptionsReal("-epsilon","Strain-regularization in p-Laplacian","",user.epsilon,&user.epsilon,NULL);CHKERRQ(ierr);
-    ierr = PetscOptionsInt("-jtype","Jacobian type, 1=plain, 2=first term","",user.jtype,&user.jtype,NULL);CHKERRQ(ierr);
+    ierr = PetscOptionsInt("-jtype","Jacobian type, 1=plain, 2=first term, 3=star, 4=full","",user.jtype,&user.jtype,NULL);CHKERRQ(ierr);
     ierr = PetscOptionsBool("-myJ","Provide my Jacobian","",myJ,&myJ,NULL);CHKERRQ(ierr);
+    ierr = PetscOptionsBool("-alloc_star","Allocate for STAR stencil (5-point)","",alloc_star,&alloc_star,NULL);CHKERRQ(ierr);
   }
   ierr = PetscOptionsEnd();CHKERRQ(ierr);
   if (user.lambda > bratu_lambda_max || user.lambda < bratu_lambda_min) {
@@ -116,11 +117,22 @@ int main(int argc,char **argv)
                       4,4,PETSC_DECIDE,PETSC_DECIDE,1,1,PETSC_NULL,PETSC_NULL,&dm);CHKERRQ(ierr);
   ierr = DMSetFromOptions(dm);CHKERRQ(ierr);
   ierr = DMSetUp(dm);CHKERRQ(ierr);
+  ierr = DMDACreate2d(PETSC_COMM_WORLD,DM_BOUNDARY_NONE,DM_BOUNDARY_NONE,DMDA_STENCIL_STAR,
+                      4,4,PETSC_DECIDE,PETSC_DECIDE,1,1,PETSC_NULL,PETSC_NULL,&dmstar);CHKERRQ(ierr);
+  ierr = DMSetFromOptions(dmstar);CHKERRQ(ierr);
+  ierr = DMSetUp(dmstar);CHKERRQ(ierr);
 
   /* - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
      Attach the DM to SNES, used for coarsening, refinement, and callbacks
   - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - */
   ierr = SNESSetDM(snes,dm);CHKERRQ(ierr);
+
+  if (alloc_star) {
+    Mat B;
+    ierr = DMCreateMatrix(dmstar,&B);CHKERRQ(ierr);
+    ierr = SNESSetJacobian(snes,B,B,PETSC_NULL,PETSC_NULL);CHKERRQ(ierr);
+    ierr = MatDestroy(&B);CHKERRQ(ierr);
+  }
 
   /*  - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
      Extract global vectors from DM; then duplicate for remaining
@@ -169,6 +181,7 @@ int main(int argc,char **argv)
   ierr = VecDestroy(&r);CHKERRQ(ierr);
   ierr = SNESDestroy(&snes);CHKERRQ(ierr);
   ierr = DMDestroy(&dm);CHKERRQ(ierr);
+  ierr = DMDestroy(&dmstar);CHKERRQ(ierr);
   ierr = PetscFinalize();CHKERRQ(ierr);
   return 0;
 }
@@ -240,6 +253,13 @@ static PetscErrorCode FormInitialGuess(DM dm,Vec X)
 /* p-Laplacian diffusivity */
 static inline PetscScalar eta(const AppCtx *ctx,PetscScalar ux,PetscScalar uy)
 {return pow(PetscSqr(ctx->epsilon)+0.5*(ux*ux + uy*uy),0.5*(ctx->p-2.));}
+static inline PetscScalar deta(const AppCtx *ctx,PetscScalar ux,PetscScalar uy)
+{
+  return (ctx->p == 2)
+    ? 0
+    : pow(PetscSqr(ctx->epsilon)+0.5*(ux*ux + uy*uy),0.5*(ctx->p-4)) * 0.5 * (ctx->p-2.);
+}
+
 
 /* ------------------------------------------------------------------- */
 #undef __FUNCT__
@@ -346,7 +366,21 @@ static PetscErrorCode FormJacobianLocal(DMDALocalInfo *info,PetscScalar **x,Mat 
           e_E = eta(user,ux_E,uy_E),
           e_W = eta(user,ux_W,uy_W),
           e_N = eta(user,ux_N,uy_N),
-          e_S = eta(user,ux_S,uy_S);
+          e_S = eta(user,ux_S,uy_S),
+          de_E = deta(user,ux_E,uy_E),
+          de_W = deta(user,ux_W,uy_W),
+          de_N = deta(user,ux_N,uy_N),
+          de_S = deta(user,ux_S,uy_S),
+          skew_E = de_E*ux_E*uy_E,
+          skew_W = de_W*ux_W*uy_W,
+          skew_N = de_N*ux_N*uy_N,
+          skew_S = de_S*ux_S*uy_S,
+          cross_EW = 0.25*(skew_E - skew_W),
+          cross_NS = 0.25*(skew_N - skew_S),
+          newt_E = e_E+de_E*PetscSqr(ux_E),
+          newt_W = e_W+de_W*PetscSqr(ux_W),
+          newt_N = e_N+de_N*PetscSqr(uy_N),
+          newt_S = e_S+de_S*PetscSqr(uy_S);
       /* interior grid points */
         switch (user->jtype) {
           case 1:
@@ -366,6 +400,46 @@ static PetscErrorCode FormJacobianLocal(DMDALocalInfo *info,PetscScalar **x,Mat 
             v[3] = -hydhx*e_E;                                           col[3].j = j;     col[3].i = i+1;
             v[4] = -hxdhy*e_N;                                           col[4].j = j+1;   col[4].i = i;
             ierr = MatSetValuesStencil(B,1,&row,5,col,v,INSERT_VALUES);CHKERRQ(ierr);
+            break;
+          case 3:
+            /* Full Jacobian, but only a star stencil */
+            col[0].j = j-1; col[0].i = i;
+            col[1].j = j;   col[1].i = i-1;
+            col[2].j = j;   col[2].i = i;
+            col[3].j = j;   col[3].i = i+1;
+            col[4].j = j+1; col[4].i = i;
+            v[0] = -hxdhy*newt_S + cross_EW;
+            v[1] = -hydhx*newt_W + cross_NS;
+            v[2] = hxdhy*(newt_N + newt_S) + hydhx*(newt_E + newt_W) - sc*PetscExpScalar(u);
+            v[3] = -hydhx*newt_E - cross_NS;
+            v[4] = -hxdhy*newt_N - cross_EW;
+            ierr = MatSetValuesStencil(B,1,&row,5,col,v,INSERT_VALUES);CHKERRQ(ierr);
+            break;
+          case 4:
+            /** The Jacobian is
+            *
+            * -div [ eta (grad u) + deta (grad u0 . grad u) grad u0 ] - (eE u0) u
+            *
+            **/
+            col[0].j = j-1; col[0].i = i-1;
+            col[1].j = j-1; col[1].i = i;
+            col[2].j = j-1; col[2].i = i+1;
+            col[3].j = j;   col[3].i = i-1;
+            col[4].j = j;   col[4].i = i;
+            col[5].j = j;   col[5].i = i+1;
+            col[6].j = j+1; col[6].i = i-1;
+            col[7].j = j+1; col[7].i = i;
+            col[8].j = j+1; col[8].i = i+1;
+            v[0] = -0.25*(skew_S + skew_W);
+            v[1] = -hxdhy*newt_S + cross_EW;
+            v[2] =  0.25*(skew_S + skew_E);
+            v[3] = -hydhx*newt_W + cross_NS;
+            v[4] = hxdhy*(newt_N + newt_S) + hydhx*(newt_E + newt_W) - sc*PetscExpScalar(u);
+            v[5] = -hydhx*newt_E - cross_NS;
+            v[6] =  0.25*(skew_N + skew_W);
+            v[7] = -hxdhy*newt_N - cross_EW;
+            v[8] = -0.25*(skew_N + skew_E);
+            ierr = MatSetValuesStencil(B,1,&row,9,col,v,INSERT_VALUES);CHKERRQ(ierr);
             break;
           default:
             SETERRQ1(PETSC_COMM_WORLD,PETSC_ERR_SUP,"Jacobian type %d not implemented",user->jtype);
