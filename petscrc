@@ -7,10 +7,11 @@
 ## View nonlinear and linear solver objects
 #-snes_view -ksp_view
 
-
 ## Customize number of grid points in x and y direction (separate lines)
--da_grid_x 80 
--da_grid_y 80
+-da_grid_x 40 
+-da_grid_y 40
 
-## Set maximum number of iterations for linear solver
--ksp_max_it 500
+## Physical parameters
+-p       2.0
+-lambda  5.0
+-epsilon 1e-5

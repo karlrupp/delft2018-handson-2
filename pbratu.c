@@ -30,8 +30,8 @@ The command line options include:\n\
 
     Program usage:  mpiexec -n <procs> ./pbratu [-help] [all PETSc options]
      e.g.,
-      ./pbratu -fd_jacobian -mat_fd_coloring_view_draw -draw_pause -1
-      mpiexec -n 2 ./pbratu -fd_jacobian_ghosted -log_summary
+      ./pbratu -snes_fd
+      mpiexec -n 2 ./pbratu -snes_fd -log_summary
 
   ------------------------------------------------------------------------- */
 
@@ -75,7 +75,7 @@ int main(int argc,char **argv)
   DM                     dm;
   PetscInt               its;                  /* iterations for convergence */
   SNESConvergedReason    reason;               /* Check convergence */
-  PetscReal              bratu_lambda_max = 42.0,bratu_lambda_min = 0.;
+  PetscReal              bratu_lambda_max = 6.81,bratu_lambda_min = 0.;
   PetscErrorCode         ierr;
 
   /* - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
@@ -231,6 +231,12 @@ static PetscErrorCode FormInitialGuess(DM dm,Vec X)
   PetscFunctionReturn(0);
 }
 
+/* p-Laplacian diffusivity */
+static inline PetscScalar eta(const AppCtx *ctx,PetscScalar ux,PetscScalar uy)
+{
+  return pow(PetscSqr(ctx->epsilon)+0.5*(ux*ux + uy*uy),0.5*(ctx->p-2.0));
+}
+
 /* ------------------------------------------------------------------- */
 #undef __FUNCT__
 #define __FUNCT__ "FormFunctionLocal"
@@ -239,14 +245,14 @@ static PetscErrorCode FormInitialGuess(DM dm,Vec X)
  */
 static PetscErrorCode FormFunctionLocal(DMDALocalInfo *info,PetscScalar **x,PetscScalar **f,AppCtx *user)
 {
-  PetscReal      hx,hy,hxdhy,hydhx,sc;
+  PetscReal      hx,hy,dhx,dhy,sc;
   PetscInt       i,j;
 
   PetscFunctionBegin;
   hx    = 1./(PetscReal)(info->mx-1);
   hy    = 1./(PetscReal)(info->my-1);
-  hxdhy = hx/hy;
-  hydhx = hy/hx;
+  dhx   = 1./hx;
+  dhy   = 1./hy;
   sc    = hx*hy*user->lambda;
   /*
      Compute function over the locally owned part of the grid
@@ -258,8 +264,24 @@ static PetscErrorCode FormFunctionLocal(DMDALocalInfo *info,PetscScalar **x,Pets
       } else {
         const PetscScalar
           u = x[j][i],
-          uxx = (2.0*u - x[j][i-1] - x[j][i+1])*hydhx,
-          uyy = (2.0*u - x[j-1][i] - x[j+1][i])*hxdhy;
+          ux_E = dhx*(x[j][i+1]-x[j][i]),
+          uy_E = 0.25*dhy*(x[j+1][i]+x[j+1][i+1]-x[j-1][i]-x[j-1][i+1]),
+          ux_W = dhx*(x[j][i]-x[j][i-1]),
+          uy_W = 0.25*dhy*(x[j+1][i-1]+x[j+1][i]-x[j-1][i-1]-x[j-1][i]),
+          ux_N = 0.25*dhx*(x[j][i+1]+x[j+1][i+1]-x[j][i-1]-x[j+1][i-1]),
+          uy_N = dhy*(x[j+1][i]-x[j][i]),
+          ux_S = 0.25*dhx*(x[j-1][i+1]+x[j][i+1]-x[j-1][i-1]-x[j][i-1]),
+          uy_S = dhy*(x[j][i]-x[j-1][i]),
+          e_E = eta(user,ux_E,uy_E),
+          e_W = eta(user,ux_W,uy_W),
+          e_N = eta(user,ux_N,uy_N),
+          e_S = eta(user,ux_S,uy_S),
+          uxx = -hy * (e_E*ux_E - e_W*ux_W),
+          uyy = -hx * (e_N*uy_N - e_S*uy_S);
+        /** For p=2, these terms decay to:
+        * uxx = (2.0*u - x[j][i-1] - x[j][i+1])*hydhx
+        * uyy = (2.0*u - x[j-1][i] - x[j+1][i])*hxdhy
+        **/
         f[j][i] = uxx + uyy - sc*PetscExpScalar(u);
       }
     }
