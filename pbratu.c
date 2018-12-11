@@ -2,11 +2,12 @@ static const char help[] = "p-Bratu nonlinear PDE in 2d.\n\
 We solve the  p-Laplacian (nonlinear diffusion) combined with\n\
 the Bratu (solid fuel ignition) nonlinearity in a 2D rectangular\n\
 domain, using distributed arrays (DAs) to partition the parallel grid.\n\
-\n\
-This example currently requires -snes_mf\n\
-\n\
-This example currently only solves the linear part (a 2-Laplacian)\n\
+The command line options include:\n\
+  -p <2>: `p' in p-Laplacian term\n\
+  -epsilon <1e-05>: Strain-regularization in p-Laplacian\n\
+  -lambda <6>: Bratu parameter\n\
 \n";
+
 
 /* ------------------------------------------------------------------------
 
@@ -53,7 +54,9 @@ This example currently only solves the linear part (a 2-Laplacian)\n\
    FormFunctionLocal().
 */
 typedef struct {
-  PetscInt dummy;
+  PetscReal lambda;         /* Bratu parameter */
+  PetscReal p;              /* Exponent in p-Laplacian */
+  PetscReal epsilon;        /* Regularization */
 } AppCtx;
 
 /*
@@ -72,6 +75,7 @@ int main(int argc,char **argv)
   DM                     dm;
   PetscInt               its;                  /* iterations for convergence */
   SNESConvergedReason    reason;               /* Check convergence */
+  PetscReal              bratu_lambda_max = 42.0,bratu_lambda_min = 0.;
   PetscErrorCode         ierr;
 
   /* - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
@@ -79,6 +83,21 @@ int main(int argc,char **argv)
      - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - */
 
   PetscInitialize(&argc,&argv,0,help);
+
+  /* - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+     Initialize problem parameters
+  - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - */
+  user.lambda = 6.0; user.p = 2.0; user.epsilon = 1e-5;
+  ierr = PetscOptionsBegin(PETSC_COMM_WORLD,NULL,"p-Bratu options",__FILE__);CHKERRQ(ierr);
+  {
+    ierr = PetscOptionsReal("-lambda","Bratu parameter","",user.lambda,&user.lambda,NULL);CHKERRQ(ierr);
+    ierr = PetscOptionsReal("-p","Exponent `p' in p-Laplacian","",user.p,&user.p,NULL);CHKERRQ(ierr);
+    ierr = PetscOptionsReal("-epsilon","Strain-regularization in p-Laplacian","",user.epsilon,&user.epsilon,NULL);CHKERRQ(ierr);
+  }
+  ierr = PetscOptionsEnd();CHKERRQ(ierr);
+  if (user.lambda > bratu_lambda_max || user.lambda < bratu_lambda_min) {
+    ierr = PetscPrintf(PETSC_COMM_WORLD,"WARNING: lambda %g out of range for p=2\n",user.lambda);CHKERRQ(ierr);
+  }
 
   /* - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
      Create nonlinear solver context
@@ -220,7 +239,7 @@ static PetscErrorCode FormInitialGuess(DM dm,Vec X)
  */
 static PetscErrorCode FormFunctionLocal(DMDALocalInfo *info,PetscScalar **x,PetscScalar **f,AppCtx *user)
 {
-  PetscReal      hx,hy,hxdhy,hydhx;
+  PetscReal      hx,hy,hxdhy,hydhx,sc;
   PetscInt       i,j;
 
   PetscFunctionBegin;
@@ -228,6 +247,7 @@ static PetscErrorCode FormFunctionLocal(DMDALocalInfo *info,PetscScalar **x,Pets
   hy    = 1./(PetscReal)(info->my-1);
   hxdhy = hx/hy;
   hydhx = hy/hx;
+  sc    = hx*hy*user->lambda;
   /*
      Compute function over the locally owned part of the grid
   */
@@ -240,7 +260,7 @@ static PetscErrorCode FormFunctionLocal(DMDALocalInfo *info,PetscScalar **x,Pets
           u = x[j][i],
           uxx = (2.0*u - x[j][i-1] - x[j][i+1])*hydhx,
           uyy = (2.0*u - x[j-1][i] - x[j+1][i])*hxdhy;
-        f[j][i] = uxx + uyy;
+        f[j][i] = uxx + uyy - sc*PetscExpScalar(u);
       }
     }
   }
